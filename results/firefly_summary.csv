@@ -1,0 +1,9 @@
+dataset,budget,mean_test_auc,std_test_auc,classical_baseline,difference
+Karate Club,50,0.649,0.0098,0.672,-0.023
+Karate Club,500,0.649,0.0098,0.672,-0.023
+Karate Club,5000,0.649,0.0098,0.672,-0.023
+Karate Club,20000,0.649,0.0098,0.672,-0.023
+Netscience,50,0.8769,0.0,0.8538,0.0231
+Netscience,500,0.8769,0.0,0.8538,0.0231
+Netscience,5000,0.8769,0.0,0.8538,0.0231
+Netscience,20000,0.8769,0.0,0.8538,0.0231
