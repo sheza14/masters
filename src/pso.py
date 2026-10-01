@@ -25,6 +25,13 @@ class PSO:
 
     The final TEST AUC is calculated only after
     optimization is complete.
+
+    Weight search space:
+        [-1, 1]
+
+    Negative weights are allowed so that PSO can
+    learn difference-like combinations between
+    correlated features.
     """
 
     def __init__(
@@ -51,13 +58,22 @@ class PSO:
         # Four feature weights
         self.dimensions = 4
 
+        # Weight search bounds
+        self.lower_bound = -1.0
+        self.upper_bound = 1.0
+
         # Random number generator
         self.rng = np.random.default_rng(seed)
 
+        # ----------------------------------------------------
         # Initial particle positions
+        #
+        # Changed from [0, 1] to [-1, 1]
+        # ----------------------------------------------------
+
         self.positions = self.rng.uniform(
-            0.0,
-            1.0,
+            self.lower_bound,
+            self.upper_bound,
             size=(
                 swarm_size,
                 self.dimensions
@@ -100,7 +116,10 @@ class PSO:
             < self.budget
         ):
 
+            # ------------------------------------------------
             # Evaluate particles
+            # ------------------------------------------------
+
             for i in range(self.swarm_size):
 
                 # Stop exactly at budget
@@ -114,7 +133,13 @@ class PSO:
                     self.positions[i]
                 )
 
+                # ------------------------------------------------
                 # Personal best
+                #
+                # Keep strict > comparison.
+                # Do NOT change this to >=.
+                # ------------------------------------------------
+
                 if score > self.personal_best_scores[i]:
 
                     self.personal_best_scores[i] = score
@@ -123,7 +148,10 @@ class PSO:
                         self.positions[i].copy()
                     )
 
+                # ------------------------------------------------
                 # Global best
+                # ------------------------------------------------
+
                 if score > self.global_best_score:
 
                     self.global_best_score = score
@@ -139,7 +167,10 @@ class PSO:
             ):
                 break
 
+            # ------------------------------------------------
             # Update particles
+            # ------------------------------------------------
+
             for i in range(self.swarm_size):
 
                 r1 = self.rng.random(
@@ -174,11 +205,14 @@ class PSO:
                     self.velocities[i]
                 )
 
-                # Keep weights between 0 and 1
+                # ------------------------------------------------
+                # Keep weights between -1 and 1
+                # ------------------------------------------------
+
                 self.positions[i] = np.clip(
                     self.positions[i],
-                    0.0,
-                    1.0
+                    self.lower_bound,
+                    self.upper_bound
                 )
 
         return (
@@ -235,6 +269,8 @@ def prepare_data(graph):
 
     # --------------------------------------------------------
     # Validation split inside the 70% training graph
+    #
+    # Changed from 10% to 30%.
     # --------------------------------------------------------
 
     (
@@ -243,7 +279,7 @@ def prepare_data(graph):
         negative_validation_edges
     ) = split_validation_graph(
         training_graph,
-        validation_ratio=0.10,
+        validation_ratio=0.30,
         seed=123
     )
 

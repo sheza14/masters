@@ -26,6 +26,9 @@ class Firefly:
 
     The final TEST AUC is calculated only after
     optimization is complete.
+
+    Search space:
+        [-1.0, 1.0]
     """
 
     def __init__(
@@ -53,9 +56,13 @@ class Firefly:
 
         self.rng = np.random.default_rng(seed)
 
+        # ----------------------------------------------------
         # Initial firefly positions
+        # Search space = [-1, 1]
+        # ----------------------------------------------------
+
         self.positions = self.rng.uniform(
-            0.0,
+            -1.0,
             1.0,
             size=(
                 population_size,
@@ -92,6 +99,7 @@ class Firefly:
 
             self.fitness_values[i] = score
 
+            # Strict improvement only
             if score > self.best_score:
 
                 self.best_score = score
@@ -149,10 +157,13 @@ class Firefly:
                         + random_step
                     )
 
-                    # Keep weights between 0 and 1
+                    # ------------------------------------------------
+                    # Keep weights inside [-1, 1]
+                    # ------------------------------------------------
+
                     self.positions[i] = np.clip(
                         self.positions[i],
-                        0.0,
+                        -1.0,
                         1.0
                     )
 
@@ -228,12 +239,16 @@ def prepare_data(graph):
         30% of original edges
 
     Validation set:
-        10% of the remaining 70% training edges
+        30% of the remaining 70% training edges
 
     Firefly optimization sees ONLY validation data.
 
     Final test evaluation uses the untouched
     30% test set.
+
+    Note:
+        Feature scaling is handled by the experiment
+        runner (experiments/run_firefly.py).
     """
 
     (
@@ -253,7 +268,7 @@ def prepare_data(graph):
         negative_validation_edges
     ) = split_validation_graph(
         training_graph,
-        validation_ratio=0.10,
+        validation_ratio=0.30,
         seed=123
     )
 
@@ -306,7 +321,7 @@ def prepare_data(graph):
 if __name__ == "__main__":
 
     # --------------------------------------------------
-    # SINGLE FIRELY TEST
+    # SINGLE FIREFLY TEST
     # --------------------------------------------------
 
     graph = nx.karate_club_graph()
