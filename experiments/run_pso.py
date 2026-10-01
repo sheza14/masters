@@ -14,6 +14,9 @@ sys.path.append(
 )
 
 import networkx as nx
+import pandas as pd
+
+from sklearn.preprocessing import MinMaxScaler
 
 from data_loader import (
     split_graph,
@@ -51,7 +54,10 @@ SEEDS = list(range(10))
 TEST_SPLIT_SEED = 42
 VALIDATION_SPLIT_SEED = 123
 
-VALIDATION_RATIO = 0.10
+# 30% validation from the 70% training graph
+VALIDATION_RATIO = 0.30
+
+# 30% of the original graph is reserved for final testing
 TEST_RATIO = 0.30
 
 
@@ -114,7 +120,7 @@ def prepare_experiment_data(graph):
     )
 
     # ------------------------------------------------------
-    # Validation data
+    # Step 3: Validation data
     # ------------------------------------------------------
 
     validation_edges = (
@@ -127,13 +133,14 @@ def prepare_experiment_data(graph):
         + [0] * len(negative_validation_edges)
     )
 
-    validation_features = calculate_features(
+    # Calculate RAW validation features
+    validation_features_raw = calculate_features(
         validation_training_graph,
         validation_edges
     )
 
     # ------------------------------------------------------
-    # Final test data
+    # Step 4: Final test data
     # ------------------------------------------------------
 
     test_edges = (
@@ -146,15 +153,44 @@ def prepare_experiment_data(graph):
         + [0] * len(negative_test_edges)
     )
 
-    test_features = calculate_features(
+    # Calculate RAW test features
+    test_features_raw = calculate_features(
         training_graph,
         test_edges
     )
 
+    # ------------------------------------------------------
+    # Step 5: Consistent Min-Max scaling
+    # ------------------------------------------------------
+    #
+    # The scaler is fitted ONLY on validation features.
+    #
+    # The SAME scaler is then used to transform the
+    # final test features.
+    #
+    # We do NOT fit another scaler on the test data.
+    # ------------------------------------------------------
+
+    scaler = MinMaxScaler()
+
+    validation_features_scaled = pd.DataFrame(
+        scaler.fit_transform(
+            validation_features_raw
+        ),
+        columns=validation_features_raw.columns
+    )
+
+    test_features_scaled = pd.DataFrame(
+        scaler.transform(
+            test_features_raw
+        ),
+        columns=test_features_raw.columns
+    )
+
     return (
-        validation_features,
+        validation_features_scaled,
         validation_labels,
-        test_features,
+        test_features_scaled,
         test_labels
     )
 
@@ -186,7 +222,7 @@ def run_one_experiment(
 
     print("=" * 60)
 
-    # Prepare fixed validation and test data
+    # Prepare validation and test data
     (
         validation_features,
         validation_labels,
@@ -194,14 +230,20 @@ def run_one_experiment(
         test_labels
     ) = prepare_experiment_data(graph)
 
-    # Create fitness function
+    # ------------------------------------------------------
+    # Fitness function
+    # ------------------------------------------------------
+
     fitness = FitnessFunction(
         validation_features,
         validation_labels,
         budget=budget
     )
 
-    # Create PSO
+    # ------------------------------------------------------
+    # PSO
+    # ------------------------------------------------------
+
     pso = PSO(
         fitness_function=fitness,
         budget=budget,
@@ -209,19 +251,29 @@ def run_one_experiment(
         swarm_size=10
     )
 
-    # Optimize
+    # ------------------------------------------------------
+    # Optimization
+    # ------------------------------------------------------
+
     (
         best_weights,
         best_validation_auc,
         evaluations
     ) = pso.optimize()
 
-    # Evaluate untouched final test set
+    # ------------------------------------------------------
+    # Final test evaluation
+    # ------------------------------------------------------
+
     test_auc = evaluate_test_auc(
         test_features,
         test_labels,
         best_weights
     )
+
+    # ------------------------------------------------------
+    # Print results
+    # ------------------------------------------------------
 
     print(
         f"Best validation AUC: "
@@ -237,6 +289,15 @@ def run_one_experiment(
         f"Evaluations used: "
         f"{evaluations}"
     )
+
+    print(
+        "Best weights:",
+        best_weights
+    )
+
+    # ------------------------------------------------------
+    # Return result
+    # ------------------------------------------------------
 
     return {
         "dataset": dataset_name,
@@ -259,7 +320,7 @@ def run_one_experiment(
 def main():
 
     # ------------------------------------------------------
-    # Create results folder if it doesn't exist
+    # Project root
     # ------------------------------------------------------
 
     project_root = os.path.abspath(
@@ -268,6 +329,10 @@ def main():
             ".."
         )
     )
+
+    # ------------------------------------------------------
+    # Results folder
+    # ------------------------------------------------------
 
     results_folder = os.path.join(
         project_root,
@@ -278,6 +343,10 @@ def main():
         results_folder,
         exist_ok=True
     )
+
+    # ------------------------------------------------------
+    # Output file
+    # ------------------------------------------------------
 
     output_file = os.path.join(
         results_folder,
@@ -302,7 +371,7 @@ def main():
     ]
 
     # ------------------------------------------------------
-    # Run experiments
+    # Experiment counters
     # ------------------------------------------------------
 
     all_results = []
@@ -314,6 +383,10 @@ def main():
     )
 
     current_run = 0
+
+    # ------------------------------------------------------
+    # Header
+    # ------------------------------------------------------
 
     print("\n")
     print("=" * 60)
@@ -339,18 +412,24 @@ def main():
         SEEDS
     )
 
+    print(
+        f"Validation ratio: {VALIDATION_RATIO}"
+    )
+
+    print(
+        f"Test ratio: {TEST_RATIO}"
+    )
+
     print("=" * 60)
 
-    # ------------------------------------------------------
-    # Dataset loop
-    # ------------------------------------------------------
+    # ======================================================
+    # DATASET LOOP
+    # ======================================================
 
     for dataset_name in DATASETS:
 
         print("\n")
-        print(
-            "#" * 60
-        )
+        print("#" * 60)
 
         print(
             f"LOADING DATASET: {dataset_name}"
@@ -364,15 +443,15 @@ def main():
             dataset_name
         )
 
-        # --------------------------------------------------
-        # Budget loop
-        # --------------------------------------------------
+        # ==================================================
+        # BUDGET LOOP
+        # ==================================================
 
         for budget in BUDGETS:
 
-            # ------------------------------------------------
-            # Seed loop
-            # ------------------------------------------------
+            # ==============================================
+            # SEED LOOP
+            # ==============================================
 
             for seed in SEEDS:
 
@@ -393,9 +472,9 @@ def main():
                     result
                 )
 
-                # Save after every run
-                # This prevents losing completed results
-                # if the experiment is interrupted.
+                # --------------------------------------------------
+                # Save after every completed run
+                # --------------------------------------------------
 
                 with open(
                     output_file,
@@ -414,9 +493,9 @@ def main():
                         all_results
                     )
 
-    # ------------------------------------------------------
-    # Finished
-    # ------------------------------------------------------
+    # ======================================================
+    # FINISHED
+    # ======================================================
 
     print("\n")
     print("=" * 60)

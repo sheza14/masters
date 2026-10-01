@@ -1,10 +1,11 @@
-import sys
 import os
+import sys
 import csv
 
 import networkx as nx
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import roc_auc_score
 
 
 # ============================================================
@@ -23,18 +24,13 @@ SRC_PATH = os.path.join(
 sys.path.insert(0, SRC_PATH)
 
 
+from artificial_bee_colony import ArtificialBeeColony
+from fitness import FitnessFunction
+from features import calculate_features
 from data_loader import (
     split_graph,
-    split_validation_graph
-)
-
-from features import calculate_features
-
-from fitness import FitnessFunction
-
-from firefly import (
-    Firefly,
-    evaluate_test_auc
+    split_validation_graph,
+    load_netscience
 )
 
 
@@ -56,17 +52,14 @@ BUDGETS = [
 
 SEEDS = list(range(10))
 
-TEST_SPLIT_SEED = 42
-VALIDATION_SPLIT_SEED = 123
-
 TEST_RATIO = 0.30
 VALIDATION_RATIO = 0.30
 
-POPULATION_SIZE = 10
+TEST_SPLIT_SEED = 42
+VALIDATION_SPLIT_SEED = 123
 
-ALPHA = 0.2
-BETA0 = 1.0
-GAMMA = 1.0
+COLONY_SIZE = 10
+LIMIT = 5
 
 
 # ============================================================
@@ -83,9 +76,9 @@ os.makedirs(
     exist_ok=True
 )
 
-RESULTS_FILE = os.path.join(
+RESULT_FILE = os.path.join(
     RESULTS_DIR,
-    "firefly_results.csv"
+    "abc_results.csv"
 )
 
 
@@ -107,20 +100,7 @@ def load_dataset(dataset_name):
             "netscience.gml"
         )
 
-        graph = nx.read_gml(path)
-
-        graph = graph.to_undirected()
-
-        largest_component_nodes = max(
-            nx.connected_components(graph),
-            key=len
-        )
-
-        graph = graph.subgraph(
-            largest_component_nodes
-        ).copy()
-
-        return graph
+        return load_netscience(path)
 
     else:
 
@@ -140,7 +120,7 @@ def prepare_experiment_data(graph):
     # --------------------------------------------------------
 
     (
-        original_graph,
+        _,
         training_graph,
         positive_test_edges,
         negative_test_edges
@@ -151,7 +131,7 @@ def prepare_experiment_data(graph):
     )
 
     # --------------------------------------------------------
-    # INTERNAL VALIDATION SPLIT
+    # INTERNAL 30% VALIDATION SPLIT
     # --------------------------------------------------------
 
     (
@@ -205,8 +185,8 @@ def prepare_experiment_data(graph):
     # --------------------------------------------------------
     # FEATURE SCALING
     # --------------------------------------------------------
-    # Fit scaler ONLY on validation features.
-    # Use the SAME scaler to transform test features.
+    # Fit ONLY on validation features.
+    # Use the SAME scaler for test features.
     # --------------------------------------------------------
 
     scaler = MinMaxScaler()
@@ -238,30 +218,13 @@ def prepare_experiment_data(graph):
 # ============================================================
 
 def run_one_experiment(
-    dataset_name,
-    budget,
-    seed,
     validation_features,
     validation_labels,
     test_features,
-    test_labels
+    test_labels,
+    budget,
+    seed
 ):
-
-    print("\n" + "=" * 60)
-
-    print(
-        f"Dataset: {dataset_name}"
-    )
-
-    print(
-        f"Budget: {budget}"
-    )
-
-    print(
-        f"Seed: {seed}"
-    )
-
-    print("=" * 60)
 
     # --------------------------------------------------------
     # FITNESS FUNCTION
@@ -274,17 +237,15 @@ def run_one_experiment(
     )
 
     # --------------------------------------------------------
-    # FIREFLY
+    # ARTIFICIAL BEE COLONY
     # --------------------------------------------------------
 
-    firefly = Firefly(
+    abc = ArtificialBeeColony(
         fitness_function=fitness,
         budget=budget,
         seed=seed,
-        population_size=POPULATION_SIZE,
-        alpha=ALPHA,
-        beta0=BETA0,
-        gamma=GAMMA
+        colony_size=COLONY_SIZE,
+        limit=LIMIT
     )
 
     # --------------------------------------------------------
@@ -295,55 +256,48 @@ def run_one_experiment(
         best_weights,
         best_validation_auc,
         evaluations
-    ) = firefly.optimize()
+    ) = abc.optimize()
 
     # --------------------------------------------------------
     # FINAL TEST EVALUATION
     # --------------------------------------------------------
 
-    final_test_auc = evaluate_test_auc(
-        test_features,
+    weights = best_weights
+
+    scores = (
+        weights[0] * test_features["cn"]
+        + weights[1] * test_features["jaccard"]
+        + weights[2] * test_features["aa"]
+        + weights[3] * test_features["ra"]
+    )
+
+    final_test_auc = roc_auc_score(
         test_labels,
-        best_weights
-    )
-
-    print(
-        f"Best validation AUC: "
-        f"{best_validation_auc:.4f}"
-    )
-
-    print(
-        f"Final test AUC: "
-        f"{final_test_auc:.4f}"
-    )
-
-    print(
-        f"Evaluations used: "
-        f"{evaluations}"
+        scores
     )
 
     return {
-        "dataset": dataset_name,
+        "dataset": None,
         "budget": budget,
         "seed": seed,
         "best_validation_auc": best_validation_auc,
         "final_test_auc": final_test_auc,
         "evaluations": evaluations,
-        "weight_cn": best_weights[0],
-        "weight_jaccard": best_weights[1],
-        "weight_aa": best_weights[2],
-        "weight_ra": best_weights[3]
+        "weight_cn": weights[0],
+        "weight_jaccard": weights[1],
+        "weight_aa": weights[2],
+        "weight_ra": weights[3]
     }
 
 
 # ============================================================
-# SAVE RESULTS
+# SAVE RESULT
 # ============================================================
 
 def save_result(result):
 
     file_exists = os.path.exists(
-        RESULTS_FILE
+        RESULT_FILE
     )
 
     fieldnames = [
@@ -360,7 +314,7 @@ def save_result(result):
     ]
 
     with open(
-        RESULTS_FILE,
+        RESULT_FILE,
         "a",
         newline=""
     ) as file:
@@ -371,7 +325,6 @@ def save_result(result):
         )
 
         if not file_exists:
-
             writer.writeheader()
 
         writer.writerow(result)
@@ -383,18 +336,29 @@ def save_result(result):
 
 def main():
 
-    print("\n" + "=" * 60)
-    print("FIREFLY LINK PREDICTION EXPERIMENT")
-    print("=" * 60)
+    print("=" * 70)
+    print("ARTIFICIAL BEE COLONY EXPERIMENT")
+    print("=" * 70)
+
+    all_data = {}
+
+    # --------------------------------------------------------
+    # PREPARE FIXED DATA ONCE PER DATASET
+    # --------------------------------------------------------
 
     for dataset_name in DATASETS:
 
         print(
-            f"\nPreparing dataset: {dataset_name}"
+            f"\nPreparing dataset: "
+            f"{dataset_name}"
         )
 
         graph = load_dataset(
             dataset_name
+        )
+
+        all_data[dataset_name] = (
+            prepare_experiment_data(graph)
         )
 
         (
@@ -402,38 +366,128 @@ def main():
             validation_labels,
             test_features,
             test_labels
-        ) = prepare_experiment_data(
-            graph
+        ) = all_data[dataset_name]
+
+        print(
+            "Validation samples:",
+            len(validation_labels)
         )
+
+        print(
+            "Test samples:",
+            len(test_labels)
+        )
+
+    # --------------------------------------------------------
+    # TOTAL RUNS
+    # --------------------------------------------------------
+
+    total_runs = (
+        len(DATASETS)
+        * len(BUDGETS)
+        * len(SEEDS)
+    )
+
+    completed_runs = 0
+
+    print(
+        f"\nTotal planned runs: "
+        f"{total_runs}"
+    )
+
+    # --------------------------------------------------------
+    # RUN ALL EXPERIMENTS
+    # --------------------------------------------------------
+
+    for dataset_name in DATASETS:
+
+        (
+            validation_features,
+            validation_labels,
+            test_features,
+            test_labels
+        ) = all_data[dataset_name]
 
         for budget in BUDGETS:
 
             for seed in SEEDS:
 
+                print(
+                    "\n" + "-" * 70
+                )
+
+                print(
+                    f"Dataset: {dataset_name}"
+                )
+
+                print(
+                    f"Budget: {budget}"
+                )
+
+                print(
+                    f"Seed: {seed}"
+                )
+
                 result = run_one_experiment(
-                    dataset_name,
-                    budget,
-                    seed,
                     validation_features,
                     validation_labels,
                     test_features,
-                    test_labels
+                    test_labels,
+                    budget,
+                    seed
                 )
+
+                result["dataset"] = dataset_name
 
                 save_result(result)
 
-    print("\n" + "=" * 60)
-    print("ALL FIREFLY EXPERIMENTS COMPLETED")
-    print("=" * 60)
+                completed_runs += 1
+
+                print(
+                    f"Validation AUC: "
+                    f"{result['best_validation_auc']:.4f}"
+                )
+
+                print(
+                    f"Test AUC: "
+                    f"{result['final_test_auc']:.4f}"
+                )
+
+                print(
+                    f"Evaluations: "
+                    f"{result['evaluations']}"
+                )
+
+                print(
+                    f"Completed: "
+                    f"{completed_runs}/{total_runs}"
+                )
+
+    # --------------------------------------------------------
+    # FINISHED
+    # --------------------------------------------------------
 
     print(
-        f"Results saved to:\n{RESULTS_FILE}"
+        "\n" + "=" * 70
     )
 
+    print(
+        "ALL ABC EXPERIMENTS COMPLETED"
+    )
 
-# ============================================================
-# RUN
-# ============================================================
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Total completed runs: "
+        f"{completed_runs}"
+    )
+
+    print(
+        f"Results saved to: "
+        f"{RESULT_FILE}"
+    )
 
 if __name__ == "__main__":
     main()
