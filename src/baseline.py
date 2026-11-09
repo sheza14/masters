@@ -1,8 +1,13 @@
+
 import networkx as nx
 from sklearn.metrics import roc_auc_score
 
-from data_loader import load_karate, load_netscience, split_graph
-from features import calculate_features
+from src.data_loader import (
+    load_karate,
+    load_netscience,
+    split_graph
+)
+from src.features import calculate_features
 
 
 def evaluate_dataset(name, graph):
@@ -11,32 +16,37 @@ def evaluate_dataset(name, graph):
     print(name)
     print("=" * 50)
 
-    # Create fixed train/test split
-    original, training, positives, negatives = split_graph(
+    # Create the fixed outer train/test split
+    (
+        original_graph,
+        training_graph,
+        positive_test_edges,
+        negative_test_edges
+    ) = split_graph(
         graph,
         test_ratio=0.30,
         seed=42
     )
 
     # Combine positive and negative test pairs
-    test_edges = positives + negatives
+    test_edges = positive_test_edges + negative_test_edges
 
-    # Labels
+    # Create labels
     labels = (
-        [1] * len(positives)
-        + [0] * len(negatives)
+        [1] * len(positive_test_edges)
+        + [0] * len(negative_test_edges)
     )
 
-    # Calculate four features using TRAINING graph
+    # Calculate features using only the outer training graph
     features = calculate_features(
-        training,
+        training_graph,
         test_edges
     )
 
-    # Calculate AUC for every feature
+    # Calculate AUC for each classical feature
     auc_scores = {}
 
-    for feature in features.columns:
+    for feature in ["cn", "jaccard", "aa", "ra"]:
 
         auc = roc_auc_score(
             labels,
@@ -47,7 +57,7 @@ def evaluate_dataset(name, graph):
 
         print(f"{feature.upper():10s}: {auc:.4f}")
 
-    # Find best classical feature
+    # Select the best individual classical heuristic
     best_feature = max(
         auc_scores,
         key=auc_scores.get
@@ -68,15 +78,9 @@ if __name__ == "__main__":
     # Karate Club
     karate = load_karate()
 
-    evaluate_dataset(
-        "Karate Club",
-        karate
-    )
+    evaluate_dataset("Karate Club", karate)
 
     # Netscience
     netscience = load_netscience()
 
-    evaluate_dataset(
-        "Netscience",
-        netscience
-    )
+    evaluate_dataset("Netscience", netscience)

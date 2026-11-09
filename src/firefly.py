@@ -1,34 +1,23 @@
-import numpy as np
-import networkx as nx
-from sklearn.metrics import roc_auc_score
 
-from fitness import FitnessFunction
-from data_loader import (
-    split_graph,
-    split_validation_graph
-)
-from features import calculate_features
+import numpy as np
+from sklearn.metrics import roc_auc_score
 
 
 class Firefly:
     """
-    Firefly Algorithm for 4-dimensional
-    link-prediction weight optimization.
+    Firefly Algorithm for 4-dimensional link-prediction
+    weight optimization.
 
-    Dimensions:
+    Feature order:
         0 = CN
         1 = Jaccard
         2 = AA
         3 = RA
 
-    The Firefly Algorithm uses VALIDATION AUC
-    during optimization.
+    Optimization uses validation AUC only.
+    Final test AUC is calculated separately by the runner.
 
-    The final TEST AUC is calculated only after
-    optimization is complete.
-
-    Search space:
-        [-1.0, 1.0]
+    Search space: [0.0, 1.0]
     """
 
     def __init__(
@@ -41,36 +30,28 @@ class Firefly:
         beta0=1.0,
         gamma=1.0
     ):
-
         self.fitness_function = fitness_function
         self.budget = budget
         self.seed = seed
 
         self.population_size = population_size
-
         self.alpha = alpha
         self.beta0 = beta0
         self.gamma = gamma
 
         self.dimensions = 4
+        self.lower_bound = 0.0
+        self.upper_bound = 1.0
 
         self.rng = np.random.default_rng(seed)
 
-        # ----------------------------------------------------
-        # Initial firefly positions
-        # Search space = [-1, 1]
-        # ----------------------------------------------------
-
+        # Initialize fireflies inside [0, 1]
         self.positions = self.rng.uniform(
-            -1.0,
-            1.0,
-            size=(
-                population_size,
-                self.dimensions
-            )
+            self.lower_bound,
+            self.upper_bound,
+            size=(population_size, self.dimensions)
         )
 
-        # Store fitness values
         self.fitness_values = np.full(
             population_size,
             -np.inf
@@ -80,17 +61,11 @@ class Firefly:
         self.best_score = -np.inf
 
     def evaluate_population(self):
-        """
-        Evaluate fireflies while respecting
-        the exact fitness-evaluation budget.
-        """
+        """Evaluate fireflies without exceeding the budget."""
 
         for i in range(self.population_size):
 
-            if (
-                self.fitness_function.evaluations
-                >= self.budget
-            ):
+            if self.fitness_function.evaluations >= self.budget:
                 break
 
             score = self.fitness_function.evaluate(
@@ -99,101 +74,94 @@ class Firefly:
 
             self.fitness_values[i] = score
 
-            # Strict improvement only
             if score > self.best_score:
-
                 self.best_score = score
-
-                self.best_position = (
-                    self.positions[i].copy()
-                )
+                self.best_position = self.positions[i].copy()
 
     def move_fireflies(self):
         """
-        Move less bright fireflies toward
-        brighter fireflies.
+        Move less bright fireflies towards brighter fireflies.
+
+        Positions and fitness values are copied before movement
+        so comparisons use the same population snapshot.
         """
+
+        old_positions = self.positions.copy()
+        old_fitness = self.fitness_values.copy()
+
+        new_positions = old_positions.copy()
 
         for i in range(self.population_size):
 
             for j in range(self.population_size):
 
-                # Firefly j is brighter than firefly i
-                if (
-                    self.fitness_values[j]
-                    > self.fitness_values[i]
-                ):
+                if old_fitness[j] > old_fitness[i]:
 
                     distance = np.linalg.norm(
-                        self.positions[i]
-                        - self.positions[j]
+                        old_positions[i] - old_positions[j]
                     )
 
                     attractiveness = (
                         self.beta0
                         * np.exp(
-                            -self.gamma
-                            * distance
-                            * distance
+                            -self.gamma * distance * distance
                         )
                     )
 
                     random_step = (
                         self.alpha
                         * (
-                            self.rng.random(
-                                self.dimensions
-                            )
+                            self.rng.random(self.dimensions)
                             - 0.5
                         )
                     )
 
-                    self.positions[i] += (
+                    new_positions[i] += (
                         attractiveness
                         * (
-                            self.positions[j]
-                            - self.positions[i]
+                            old_positions[j] - new_positions[i]
                         )
                         + random_step
                     )
 
-                    # ------------------------------------------------
-                    # Keep weights inside [-1, 1]
-                    # ------------------------------------------------
+            # Keep every weight within [0, 1]
+            new_positions[i] = np.clip(
+                new_positions[i],
+                self.lower_bound,
+                self.upper_bound
+            )
 
-                    self.positions[i] = np.clip(
-                        self.positions[i],
-                        -1.0,
-                        1.0
-                    )
+        self.positions = new_positions
 
     def optimize(self):
         """
-        Run Firefly optimization until the
-        exact fitness-evaluation budget is reached.
+        Run optimization until the exact evaluation budget
+        is reached.
         """
 
-        while (
-            self.fitness_function.evaluations
-            < self.budget
-        ):
+        while self.fitness_function.evaluations < self.budget:
 
-            # Evaluate current population
             self.evaluate_population()
 
-            if (
-                self.fitness_function.evaluations
-                >= self.budget
-            ):
+            if self.fitness_function.evaluations >= self.budget:
                 break
 
-            # Move fireflies
             self.move_fireflies()
 
-            # Reset fitness values because positions changed
+            # New positions need fresh fitness evaluations
             self.fitness_values = np.full(
                 self.population_size,
                 -np.inf
+            )
+
+        if self.best_position is None:
+            raise RuntimeError(
+                "Firefly did not evaluate any solution."
+            )
+
+        if self.fitness_function.evaluations != self.budget:
+            raise RuntimeError(
+                "Firefly did not use the exact evaluation budget."
             )
 
         return (
@@ -203,20 +171,16 @@ class Firefly:
         )
 
 
-def evaluate_test_auc(
-    features,
-    labels,
-    weights
-):
+def evaluate_test_auc(features, labels, weights):
     """
-    Calculate final TEST ROC-AUC using the
-    best weights found by Firefly.
+    Calculate final test ROC-AUC using the best
+    weights obtained during validation optimization.
     """
 
-    weights = np.asarray(
-        weights,
-        dtype=float
-    )
+    weights = np.asarray(weights, dtype=float)
+
+    if len(weights) != 4:
+        raise ValueError("Exactly four weights are required.")
 
     scores = (
         weights[0] * features["cn"]
@@ -225,170 +189,4 @@ def evaluate_test_auc(
         + weights[3] * features["ra"]
     )
 
-    return roc_auc_score(
-        labels,
-        scores
-    )
-
-
-def prepare_data(graph):
-    """
-    Prepare leakage-free validation and test data.
-
-    Final test set:
-        30% of original edges
-
-    Validation set:
-        30% of the remaining 70% training edges
-
-    Firefly optimization sees ONLY validation data.
-
-    Final test evaluation uses the untouched
-    30% test set.
-
-    Note:
-        Feature scaling is handled by the experiment
-        runner (experiments/run_firefly.py).
-    """
-
-    (
-        original,
-        training_graph,
-        positive_test_edges,
-        negative_test_edges
-    ) = split_graph(
-        graph,
-        test_ratio=0.30,
-        seed=42
-    )
-
-    (
-        validation_training_graph,
-        positive_validation_edges,
-        negative_validation_edges
-    ) = split_validation_graph(
-        training_graph,
-        validation_ratio=0.30,
-        seed=123
-    )
-
-    # --------------------------------------------------
-    # VALIDATION DATA
-    # --------------------------------------------------
-
-    validation_edges = (
-        positive_validation_edges
-        + negative_validation_edges
-    )
-
-    validation_labels = (
-        [1] * len(positive_validation_edges)
-        + [0] * len(negative_validation_edges)
-    )
-
-    validation_features = calculate_features(
-        validation_training_graph,
-        validation_edges
-    )
-
-    # --------------------------------------------------
-    # FINAL TEST DATA
-    # --------------------------------------------------
-
-    test_edges = (
-        positive_test_edges
-        + negative_test_edges
-    )
-
-    test_labels = (
-        [1] * len(positive_test_edges)
-        + [0] * len(negative_test_edges)
-    )
-
-    test_features = calculate_features(
-        training_graph,
-        test_edges
-    )
-
-    return (
-        validation_features,
-        validation_labels,
-        test_features,
-        test_labels
-    )
-
-
-if __name__ == "__main__":
-
-    # --------------------------------------------------
-    # SINGLE FIREFLY TEST
-    # --------------------------------------------------
-
-    graph = nx.karate_club_graph()
-
-    budget = 20000
-    seed = 1
-
-    (
-        validation_features,
-        validation_labels,
-        test_features,
-        test_labels
-    ) = prepare_data(graph)
-
-    # Create validation fitness function
-    fitness = FitnessFunction(
-        validation_features,
-        validation_labels,
-        budget=budget
-    )
-
-    # Create Firefly optimizer
-    firefly = Firefly(
-        fitness_function=fitness,
-        budget=budget,
-        seed=seed,
-        population_size=10,
-        alpha=0.2,
-        beta0=1.0,
-        gamma=1.0
-    )
-
-    # Run optimization
-    (
-        best_weights,
-        best_validation_auc,
-        evaluations
-    ) = firefly.optimize()
-
-    # Final evaluation on untouched test set
-    test_auc = evaluate_test_auc(
-        test_features,
-        test_labels,
-        best_weights
-    )
-
-    print("\nFirefly Leakage-Free Test")
-    print("=" * 50)
-
-    print("Dataset: Karate Club")
-    print("Budget:", budget)
-    print("Seed:", seed)
-
-    print("\nBest weights:")
-    print(best_weights)
-
-    print(
-        f"\nBest validation AUC: "
-        f"{best_validation_auc:.4f}"
-    )
-
-    print(
-        f"Final test AUC: "
-        f"{test_auc:.4f}"
-    )
-
-    print(
-        "Evaluations used:",
-        evaluations
-    )
+    return roc_auc_score(labels, scores)

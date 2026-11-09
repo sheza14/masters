@@ -1,99 +1,66 @@
+
 import networkx as nx
 import random
 
 
 def load_karate():
-    """Load the Zachary Karate Club graph."""
+    """Load the Karate Club dataset."""
     return nx.karate_club_graph()
 
 
 def load_netscience(path="data/netscience.gml"):
-    """
-    Load the Netscience co-authorship network
-    and return its largest connected component.
-    """
-
+    """Load Netscience and return its largest connected component."""
     graph = nx.read_gml(path)
 
-    # Convert to undirected graph
-    graph = graph.to_undirected()
+    # Convert directed graph to undirected if necessary
+    if graph.is_directed():
+        graph = graph.to_undirected()
 
-    # Find largest connected component
-    largest_component_nodes = max(
+    largest_component = max(
         nx.connected_components(graph),
         key=len
     )
 
-    # Create independent graph
-    largest_component = graph.subgraph(
-        largest_component_nodes
-    ).copy()
+    graph = graph.subgraph(largest_component).copy()
 
-    return largest_component
+    return graph
+
+
+def get_all_non_edges(graph):
+    """Return all node pairs that are not connected by an edge."""
+    return list(nx.non_edges(graph))
 
 
 def split_graph(graph, test_ratio=0.30, seed=42):
     """
-    Create the fixed final train/test split.
+    Outer split:
+    70% edges for training and 30% for final testing.
 
-    30% of original edges are held out as
-    the final positive test edges.
-
-    Negative test edges are node pairs that
-    were NOT edges in the original graph.
-
-    This split is fixed and reused throughout
-    the experiment.
+    Negative test edges are sampled from non-edges
+    of the original graph.
     """
+    rng = random.Random(seed)
 
-    random.seed(seed)
-
-    # Keep original graph
     original_graph = graph.copy()
 
-    # Get all edges
     edges = list(original_graph.edges())
+    rng.shuffle(edges)
 
-    # Number of positive test edges
-    num_test_edges = int(
-        len(edges) * test_ratio
-    )
+    test_size = int(len(edges) * test_ratio)
 
-    # Select positive test edges
-    positive_test_edges = random.sample(
-        edges,
-        num_test_edges
-    )
+    positive_test_edges = edges[:test_size]
 
-    # Create training graph
     training_graph = original_graph.copy()
+    training_graph.remove_edges_from(positive_test_edges)
 
-    # Remove test edges
-    training_graph.remove_edges_from(
-        positive_test_edges
-    )
+    all_negative_edges = get_all_non_edges(original_graph)
 
-    # Generate possible negative edges
-    possible_negative_edges = []
+    if len(all_negative_edges) < test_size:
+        raise ValueError("Not enough negative edges for testing.")
 
-    nodes = list(original_graph.nodes())
-
-    for i in range(len(nodes)):
-        for j in range(i + 1, len(nodes)):
-
-            u = nodes[i]
-            v = nodes[j]
-
-            # Must not be an edge in ORIGINAL graph
-            if not original_graph.has_edge(u, v):
-                possible_negative_edges.append(
-                    (u, v)
-                )
-
-    # Same number of negatives as positives
-    negative_test_edges = random.sample(
-        possible_negative_edges,
-        num_test_edges
+    negative_test_edges = rng.sample(
+        all_negative_edges,
+        test_size
     )
 
     return (
@@ -106,69 +73,53 @@ def split_graph(graph, test_ratio=0.30, seed=42):
 
 def split_validation_graph(
     training_graph,
-    validation_ratio=0.10,
+    original_graph,
+    excluded_negative_edges=None,
+    validation_ratio=0.30,
     seed=123
 ):
     """
-    Create a validation split INSIDE the 70% training graph.
+    Inner split:
+    Split the outer training graph into:
+    70% inner training and 30% validation.
 
-    The final 30% test set is never used here.
-
-    Returns:
-
-    validation_training_graph
-    positive_validation_edges
-    negative_validation_edges
+    Validation negatives are sampled from original graph
+    non-edges, excluding final test negatives.
     """
+    rng = random.Random(seed)
 
-    random.seed(seed)
-
-    # Copy the 70% training graph
-    graph = training_graph.copy()
-
-    # Get training edges
-    edges = list(graph.edges())
-
-    # Number of validation positives
-    num_validation_edges = int(
-        len(edges) * validation_ratio
+    excluded_negative_edges = set(
+        excluded_negative_edges or []
     )
 
-    # Select validation positive edges
-    positive_validation_edges = random.sample(
-        edges,
-        num_validation_edges
-    )
+    edges = list(training_graph.edges())
+    rng.shuffle(edges)
 
-    # Remove validation positives
-    validation_training_graph = graph.copy()
+    validation_size = int(len(edges) * validation_ratio)
 
+    positive_validation_edges = edges[:validation_size]
+
+    validation_training_graph = training_graph.copy()
     validation_training_graph.remove_edges_from(
         positive_validation_edges
     )
 
-    # Generate possible negative validation pairs
-    possible_negative_edges = []
+    all_negative_edges = get_all_non_edges(original_graph)
 
-    nodes = list(graph.nodes())
+    available_negative_edges = [
+        edge for edge in all_negative_edges
+        if edge not in excluded_negative_edges
+        and (edge[1], edge[0]) not in excluded_negative_edges
+    ]
 
-    for i in range(len(nodes)):
-        for j in range(i + 1, len(nodes)):
+    if len(available_negative_edges) < validation_size:
+        raise ValueError(
+            "Not enough negative edges for validation."
+        )
 
-            u = nodes[i]
-            v = nodes[j]
-
-            # Negative must not be an edge in
-            # the graph BEFORE validation removal
-            if not graph.has_edge(u, v):
-                possible_negative_edges.append(
-                    (u, v)
-                )
-
-    # Same number of negative and positive examples
-    negative_validation_edges = random.sample(
-        possible_negative_edges,
-        num_validation_edges
+    negative_validation_edges = rng.sample(
+        available_negative_edges,
+        validation_size
     )
 
     return (
@@ -180,121 +131,48 @@ def split_validation_graph(
 
 if __name__ == "__main__":
 
-    # ==================================================
-    # 1. Karate Club
-    # ==================================================
+    print("Testing data loader...\n")
 
-    print("=" * 50)
-    print("KARATE CLUB")
-    print("=" * 50)
+    datasets = {
+        "Karate Club": load_karate(),
+        "Netscience": load_netscience()
+    }
 
-    karate = load_karate()
+    for name, graph in datasets.items():
 
-    print("Original graph")
-    print("Nodes:", karate.number_of_nodes())
-    print("Edges:", karate.number_of_edges())
+        (
+            original_graph,
+            training_graph,
+            positive_test,
+            negative_test
+        ) = split_graph(
+            graph,
+            test_ratio=0.30,
+            seed=42
+        )
 
-    (
-        original,
-        training,
-        positives,
-        negatives
-    ) = split_graph(
-        karate,
-        test_ratio=0.30,
-        seed=42
-    )
+        (
+            validation_training_graph,
+            positive_validation,
+            negative_validation
+        ) = split_validation_graph(
+            training_graph=training_graph,
+            original_graph=original_graph,
+            excluded_negative_edges=negative_test,
+            validation_ratio=0.30,
+            seed=123
+        )
 
-    print("\nTraining graph")
-    print("Nodes:", training.number_of_nodes())
-    print("Edges:", training.number_of_edges())
-
-    print("\nPositive test edges:", len(positives))
-    print("Negative test edges:", len(negatives))
-
-    # Validation split
-    (
-        validation_training,
-        validation_positives,
-        validation_negatives
-    ) = split_validation_graph(
-        training,
-        validation_ratio=0.10,
-        seed=123
-    )
-
-    print("\nValidation split")
-    print(
-        "Validation training edges:",
-        validation_training.number_of_edges()
-    )
-
-    print(
-        "Positive validation edges:",
-        len(validation_positives)
-    )
-
-    print(
-        "Negative validation edges:",
-        len(validation_negatives)
-    )
-
-
-    # ==================================================
-    # 2. Netscience
-    # ==================================================
-
-    print("\n" + "=" * 50)
-    print("NETSCIENCE")
-    print("=" * 50)
-
-    netscience = load_netscience()
-
-    print("Largest connected component")
-    print("Nodes:", netscience.number_of_nodes())
-    print("Edges:", netscience.number_of_edges())
-
-    (
-        original_ns,
-        training_ns,
-        positives_ns,
-        negatives_ns
-    ) = split_graph(
-        netscience,
-        test_ratio=0.30,
-        seed=42
-    )
-
-    print("\nTraining graph")
-    print("Nodes:", training_ns.number_of_nodes())
-    print("Edges:", training_ns.number_of_edges())
-
-    print("\nPositive test edges:", len(positives_ns))
-    print("Negative test edges:", len(negatives_ns))
-
-    # Validation split
-    (
-        validation_training_ns,
-        validation_positives_ns,
-        validation_negatives_ns
-    ) = split_validation_graph(
-        training_ns,
-        validation_ratio=0.10,
-        seed=123
-    )
-
-    print("\nValidation split")
-    print(
-        "Validation training edges:",
-        validation_training_ns.number_of_edges()
-    )
-
-    print(
-        "Positive validation edges:",
-        len(validation_positives_ns)
-    )
-
-    print(
-        "Negative validation edges:",
-        len(validation_negatives_ns)
-    )
+        print(f"Dataset: {name}")
+        print(f"Original nodes: {original_graph.number_of_nodes()}")
+        print(f"Original edges: {original_graph.number_of_edges()}")
+        print(f"Outer training edges: {training_graph.number_of_edges()}")
+        print(f"Final test positive edges: {len(positive_test)}")
+        print(f"Final test negative edges: {len(negative_test)}")
+        print(
+            f"Inner training edges: "
+            f"{validation_training_graph.number_of_edges()}"
+        )
+        print(f"Validation positive edges: {len(positive_validation)}")
+        print(f"Validation negative edges: {len(negative_validation)}")
+        print("-" * 40)

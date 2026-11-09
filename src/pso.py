@@ -1,37 +1,20 @@
-import numpy as np
-import networkx as nx
-from sklearn.metrics import roc_auc_score
 
-from fitness import FitnessFunction
-from data_loader import (
-    split_graph,
-    split_validation_graph
-)
-from features import calculate_features
+import numpy as np
+from sklearn.metrics import roc_auc_score
 
 
 class PSO:
     """
-    Particle Swarm Optimization for 4-dimensional
-    link-prediction weight optimization.
+    Particle Swarm Optimization for link prediction.
 
-    Dimensions:
+    Feature order:
         0 = CN
         1 = Jaccard
         2 = AA
         3 = RA
 
-    The PSO uses VALIDATION AUC as its fitness.
-
-    The final TEST AUC is calculated only after
-    optimization is complete.
-
-    Weight search space:
-        [-1, 1]
-
-    Negative weights are allowed so that PSO can
-    learn difference-like combinations between
-    correlated features.
+    Fitness: Validation ROC-AUC
+    Search bounds: [0, 1]
     """
 
     def __init__(
@@ -45,55 +28,44 @@ class PSO:
         social=1.5
     ):
 
+        if budget <= 0:
+            raise ValueError("Budget must be positive.")
+
+        if swarm_size <= 0:
+            raise ValueError("Swarm size must be positive.")
+
         self.fitness_function = fitness_function
         self.budget = budget
         self.seed = seed
-
         self.swarm_size = swarm_size
 
         self.inertia = inertia
         self.cognitive = cognitive
         self.social = social
 
-        # Four feature weights
         self.dimensions = 4
 
-        # Weight search bounds
-        self.lower_bound = -1.0
+        self.lower_bound = 0.0
         self.upper_bound = 1.0
 
-        # Random number generator
         self.rng = np.random.default_rng(seed)
 
-        # ----------------------------------------------------
-        # Initial particle positions
-        #
-        # Changed from [0, 1] to [-1, 1]
-        # ----------------------------------------------------
-
+        # Initialize particle positions
         self.positions = self.rng.uniform(
             self.lower_bound,
             self.upper_bound,
-            size=(
-                swarm_size,
-                self.dimensions
-            )
+            size=(swarm_size, self.dimensions)
         )
 
-        # Initial velocities
+        # Initialize particle velocities
         self.velocities = self.rng.uniform(
             -0.1,
             0.1,
-            size=(
-                swarm_size,
-                self.dimensions
-            )
+            size=(swarm_size, self.dimensions)
         )
 
-        # Personal best
-        self.personal_best_positions = (
-            self.positions.copy()
-        )
+        # Personal best positions and scores
+        self.personal_best_positions = self.positions.copy()
 
         self.personal_best_scores = np.full(
             swarm_size,
@@ -105,41 +77,24 @@ class PSO:
         self.global_best_score = -np.inf
 
     def optimize(self):
-
         """
-        Run PSO until the exact fitness evaluation
-        budget is reached.
+        Run PSO until the exact fitness evaluation budget
+        is reached.
         """
 
-        while (
-            self.fitness_function.evaluations
-            < self.budget
-        ):
+        while self.fitness_function.evaluations < self.budget:
 
-            # ------------------------------------------------
             # Evaluate particles
-            # ------------------------------------------------
-
             for i in range(self.swarm_size):
 
-                # Stop exactly at budget
-                if (
-                    self.fitness_function.evaluations
-                    >= self.budget
-                ):
+                if self.fitness_function.evaluations >= self.budget:
                     break
 
                 score = self.fitness_function.evaluate(
                     self.positions[i]
                 )
 
-                # ------------------------------------------------
-                # Personal best
-                #
-                # Keep strict > comparison.
-                # Do NOT change this to >=.
-                # ------------------------------------------------
-
+                # Update personal best
                 if score > self.personal_best_scores[i]:
 
                     self.personal_best_scores[i] = score
@@ -148,10 +103,7 @@ class PSO:
                         self.positions[i].copy()
                     )
 
-                # ------------------------------------------------
-                # Global best
-                # ------------------------------------------------
-
+                # Update global best
                 if score > self.global_best_score:
 
                     self.global_best_score = score
@@ -160,38 +112,24 @@ class PSO:
                         self.positions[i].copy()
                     )
 
-            # Stop if budget exhausted
-            if (
-                self.fitness_function.evaluations
-                >= self.budget
-            ):
+            # Stop when the exact budget is reached
+            if self.fitness_function.evaluations >= self.budget:
                 break
 
-            # ------------------------------------------------
-            # Update particles
-            # ------------------------------------------------
-
+            # Update velocities and positions
             for i in range(self.swarm_size):
 
-                r1 = self.rng.random(
-                    self.dimensions
-                )
-
-                r2 = self.rng.random(
-                    self.dimensions
-                )
+                r1 = self.rng.random(self.dimensions)
+                r2 = self.rng.random(self.dimensions)
 
                 self.velocities[i] = (
-                    self.inertia
-                    * self.velocities[i]
-
+                    self.inertia * self.velocities[i]
                     + self.cognitive
                     * r1
                     * (
                         self.personal_best_positions[i]
                         - self.positions[i]
                     )
-
                     + self.social
                     * r2
                     * (
@@ -200,20 +138,24 @@ class PSO:
                     )
                 )
 
-                # Move particle
-                self.positions[i] += (
-                    self.velocities[i]
-                )
+                self.positions[i] += self.velocities[i]
 
-                # ------------------------------------------------
-                # Keep weights between -1 and 1
-                # ------------------------------------------------
-
+                # Keep particle weights inside [0, 1]
                 self.positions[i] = np.clip(
                     self.positions[i],
                     self.lower_bound,
                     self.upper_bound
                 )
+
+        if self.global_best_position is None:
+            raise RuntimeError(
+                "PSO did not evaluate any solution."
+            )
+
+        if self.fitness_function.evaluations != self.budget:
+            raise RuntimeError(
+                "PSO did not use the exact evaluation budget."
+            )
 
         return (
             self.global_best_position,
@@ -222,201 +164,22 @@ class PSO:
         )
 
 
-def evaluate_test_auc(
-    features,
-    labels,
-    weights
-):
+def evaluate_test_auc(features, labels, weights):
     """
-    Calculate final TEST ROC-AUC using the
-    best weights found by PSO.
+    Calculate final test ROC-AUC using the best
+    weights found during validation optimization.
     """
 
-    weights = np.asarray(
-        weights,
-        dtype=float
-    )
+    weights = np.asarray(weights, dtype=float)
+
+    if len(weights) != 4:
+        raise ValueError("Exactly four weights are required.")
 
     scores = (
-        weights[0] * features["cn"]
-        + weights[1] * features["jaccard"]
-        + weights[2] * features["aa"]
-        + weights[3] * features["ra"]
+        weights[0] * features["cn"].to_numpy()
+        + weights[1] * features["jaccard"].to_numpy()
+        + weights[2] * features["aa"].to_numpy()
+        + weights[3] * features["ra"].to_numpy()
     )
 
-    return roc_auc_score(
-        labels,
-        scores
-    )
-
-
-def prepare_data(graph):
-
-    # --------------------------------------------------------
-    # Fixed final 30% test split
-    # --------------------------------------------------------
-
-    (
-        original,
-        training_graph,
-        positive_test_edges,
-        negative_test_edges
-    ) = split_graph(
-        graph,
-        test_ratio=0.30,
-        seed=42
-    )
-
-    # --------------------------------------------------------
-    # Validation split inside the 70% training graph
-    #
-    # Changed from 10% to 30%.
-    # --------------------------------------------------------
-
-    (
-        validation_training_graph,
-        positive_validation_edges,
-        negative_validation_edges
-    ) = split_validation_graph(
-        training_graph,
-        validation_ratio=0.30,
-        seed=123
-    )
-
-    # --------------------------------------------------------
-    # Validation data
-    # --------------------------------------------------------
-
-    validation_edges = (
-        positive_validation_edges
-        + negative_validation_edges
-    )
-
-    validation_labels = (
-        [1] * len(positive_validation_edges)
-        + [0] * len(negative_validation_edges)
-    )
-
-    validation_features = calculate_features(
-        validation_training_graph,
-        validation_edges
-    )
-
-    # --------------------------------------------------------
-    # Final test data
-    #
-    # IMPORTANT:
-    # The full 70% training graph is used here.
-    # The final test edges were never used by PSO.
-    # --------------------------------------------------------
-
-    test_edges = (
-        positive_test_edges
-        + negative_test_edges
-    )
-
-    test_labels = (
-        [1] * len(positive_test_edges)
-        + [0] * len(negative_test_edges)
-    )
-
-    test_features = calculate_features(
-        training_graph,
-        test_edges
-    )
-
-    return (
-        validation_features,
-        validation_labels,
-        test_features,
-        test_labels
-    )
-
-
-if __name__ == "__main__":
-
-    # ========================================================
-    # TEST PSO
-    # ========================================================
-
-    graph = nx.karate_club_graph()
-
-    # Use one budget for testing
-    budget = 20000
-
-    # Optimizer seed
-    seed = 42
-
-    # Prepare validation and final test data
-    (
-        validation_features,
-        validation_labels,
-        test_features,
-        test_labels
-    ) = prepare_data(graph)
-
-    # --------------------------------------------------------
-    # Fitness uses VALIDATION data
-    # --------------------------------------------------------
-
-    fitness = FitnessFunction(
-        validation_features,
-        validation_labels,
-        budget=budget
-    )
-
-    # --------------------------------------------------------
-    # Run PSO
-    # --------------------------------------------------------
-
-    pso = PSO(
-        fitness_function=fitness,
-        budget=budget,
-        seed=seed,
-        swarm_size=10
-    )
-
-    (
-        best_weights,
-        best_validation_auc,
-        evaluations
-    ) = pso.optimize()
-
-    # --------------------------------------------------------
-    # Final TEST evaluation
-    # --------------------------------------------------------
-
-    test_auc = evaluate_test_auc(
-        test_features,
-        test_labels,
-        best_weights
-    )
-
-    # --------------------------------------------------------
-    # Results
-    # --------------------------------------------------------
-
-    print("\nPSO Leakage-Free Test")
-    print("=" * 50)
-
-    print("Dataset: Karate Club")
-    print("Budget:", budget)
-    print("Seed:", seed)
-
-    print("\nBest weights:")
-    print(best_weights)
-
-    print(
-        f"\nBest validation AUC: "
-        f"{best_validation_auc:.4f}"
-    )
-
-    print(
-        f"Final test AUC: "
-        f"{test_auc:.4f}"
-    )
-
-    print(
-        "Evaluations used:",
-        evaluations
-    )
+    return roc_auc_score(labels, scores)

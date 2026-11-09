@@ -1,41 +1,41 @@
-import sys
+
 import os
+import sys
 import csv
 
-# Add src folder to Python path
-sys.path.append(
-    os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "src"
-        )
-    )
-)
-
-import networkx as nx
+import numpy as np
 import pandas as pd
+import networkx as nx
 
 from sklearn.preprocessing import MinMaxScaler
 
+
+# ============================================================
+# PROJECT PATHS
+# ============================================================
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+
+SRC_PATH = os.path.join(PROJECT_ROOT, "src")
+sys.path.insert(0, SRC_PATH)
+
+
 from data_loader import (
     split_graph,
-    split_validation_graph
+    split_validation_graph,
+    load_netscience
 )
 
 from features import calculate_features
-
 from fitness import FitnessFunction
-
-from pso import (
-    PSO,
-    evaluate_test_auc
-)
+from pso import PSO, evaluate_test_auc
 
 
-# ==========================================================
-# EXPERIMENT SETTINGS
-# ==========================================================
+# ============================================================
+# FINAL EXPERIMENT SETTINGS
+# ============================================================
 
 DATASETS = [
     "Karate Club",
@@ -54,46 +54,69 @@ SEEDS = list(range(10))
 TEST_SPLIT_SEED = 42
 VALIDATION_SPLIT_SEED = 123
 
-# 30% validation from the 70% training graph
+TEST_RATIO = 0.30
 VALIDATION_RATIO = 0.30
 
-# 30% of the original graph is reserved for final testing
-TEST_RATIO = 0.30
+SWARM_SIZE = 10
+
+FEATURE_COLUMNS = [
+    "cn",
+    "jaccard",
+    "aa",
+    "ra"
+]
 
 
-# ==========================================================
+# ============================================================
+# OUTPUT FILE
+# ============================================================
+
+RESULTS_DIR = os.path.join(
+    PROJECT_ROOT,
+    "results"
+)
+
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+RESULTS_FILE = os.path.join(
+    RESULTS_DIR,
+    "pso_results.csv"
+)
+
+
+# ============================================================
 # LOAD DATASET
-# ==========================================================
+# ============================================================
 
-def load_dataset(dataset_name):
+def get_dataset(name):
 
-    if dataset_name == "Karate Club":
-
+    if name == "Karate Club":
         return nx.karate_club_graph()
 
-    elif dataset_name == "Netscience":
+    elif name == "Netscience":
 
-        from data_loader import load_netscience
+        netscience_path = os.path.join(
+            PROJECT_ROOT,
+            "data",
+            "netscience.gml"
+        )
 
-        return load_netscience()
+        return load_netscience(netscience_path)
 
     else:
-
         raise ValueError(
-            f"Unknown dataset: {dataset_name}"
+            f"Unknown dataset: {name}"
         )
 
 
-# ==========================================================
-# PREPARE DATA
-# ==========================================================
+# ============================================================
+# PREPARE EXPERIMENT DATA
+# ============================================================
+
 
 def prepare_experiment_data(graph):
 
-    # ------------------------------------------------------
-    # Step 1: Fixed 30% final test split
-    # ------------------------------------------------------
-
+    # OUTER TEST SPLIT: 30%
     (
         original_graph,
         training_graph,
@@ -105,47 +128,37 @@ def prepare_experiment_data(graph):
         seed=TEST_SPLIT_SEED
     )
 
-    # ------------------------------------------------------
-    # Step 2: Validation split inside 70% training graph
-    # ------------------------------------------------------
-
+    # INNER VALIDATION SPLIT: 30%
     (
-        validation_training_graph,
-        positive_validation_edges,
-        negative_validation_edges
+        inner_training_graph,
+        validation_positive,
+        validation_negative
     ) = split_validation_graph(
-        training_graph,
+        training_graph=training_graph,
+        original_graph=original_graph,
+        excluded_negative_edges=negative_test_edges,
         validation_ratio=VALIDATION_RATIO,
         seed=VALIDATION_SPLIT_SEED
     )
 
-    # ------------------------------------------------------
-    # Step 3: Validation data
-    # ------------------------------------------------------
-
+    # VALIDATION DATA
     validation_edges = (
-        positive_validation_edges
-        + negative_validation_edges
+        validation_positive + validation_negative
     )
 
     validation_labels = (
-        [1] * len(positive_validation_edges)
-        + [0] * len(negative_validation_edges)
+        [1] * len(validation_positive)
+        + [0] * len(validation_negative)
     )
 
-    # Calculate RAW validation features
     validation_features_raw = calculate_features(
-        validation_training_graph,
+        inner_training_graph,
         validation_edges
     )
 
-    # ------------------------------------------------------
-    # Step 4: Final test data
-    # ------------------------------------------------------
-
+    # FINAL TEST DATA
     test_edges = (
-        positive_test_edges
-        + negative_test_edges
+        positive_test_edges + negative_test_edges
     )
 
     test_labels = (
@@ -153,38 +166,26 @@ def prepare_experiment_data(graph):
         + [0] * len(negative_test_edges)
     )
 
-    # Calculate RAW test features
     test_features_raw = calculate_features(
         training_graph,
         test_edges
     )
 
-    # ------------------------------------------------------
-    # Step 5: Consistent Min-Max scaling
-    # ------------------------------------------------------
-    #
-    # The scaler is fitted ONLY on validation features.
-    #
-    # The SAME scaler is then used to transform the
-    # final test features.
-    #
-    # We do NOT fit another scaler on the test data.
-    # ------------------------------------------------------
-
+    # FEATURE SCALING
     scaler = MinMaxScaler()
 
     validation_features_scaled = pd.DataFrame(
         scaler.fit_transform(
-            validation_features_raw
+            validation_features_raw[FEATURE_COLUMNS]
         ),
-        columns=validation_features_raw.columns
+        columns=FEATURE_COLUMNS
     )
 
     test_features_scaled = pd.DataFrame(
         scaler.transform(
-            test_features_raw
+            test_features_raw[FEATURE_COLUMNS]
         ),
-        columns=test_features_raw.columns
+        columns=FEATURE_COLUMNS
     )
 
     return (
@@ -193,67 +194,43 @@ def prepare_experiment_data(graph):
         test_features_scaled,
         test_labels
     )
-
-
-# ==========================================================
+# ============================================================
 # RUN ONE EXPERIMENT
-# ==========================================================
+# ============================================================
 
-def run_one_experiment(
+def run_experiment(
     dataset_name,
-    graph,
     budget,
-    seed
+    seed,
+    validation_features,
+    validation_labels,
+    test_features,
+    test_labels
 ):
 
     print("\n" + "=" * 60)
-
-    print(
-        f"Dataset: {dataset_name}"
-    )
-
-    print(
-        f"Budget: {budget}"
-    )
-
-    print(
-        f"Seed: {seed}"
-    )
-
+    print(f"Dataset: {dataset_name}")
+    print(f"Budget: {budget}")
+    print(f"Seed: {seed}")
     print("=" * 60)
 
-    # Prepare validation and test data
-    (
-        validation_features,
-        validation_labels,
-        test_features,
-        test_labels
-    ) = prepare_experiment_data(graph)
-
-    # ------------------------------------------------------
-    # Fitness function
-    # ------------------------------------------------------
-
+    # Fresh fitness function for every run
     fitness = FitnessFunction(
         validation_features,
         validation_labels,
-        budget=budget
+        budget
     )
-
-    # ------------------------------------------------------
-    # PSO
-    # ------------------------------------------------------
 
     pso = PSO(
         fitness_function=fitness,
         budget=budget,
         seed=seed,
-        swarm_size=10
+        swarm_size=SWARM_SIZE
     )
 
-    # ------------------------------------------------------
-    # Optimization
-    # ------------------------------------------------------
+    # --------------------------------------------------------
+    # OPTIMIZATION
+    # --------------------------------------------------------
 
     (
         best_weights,
@@ -261,50 +238,37 @@ def run_one_experiment(
         evaluations
     ) = pso.optimize()
 
-    # ------------------------------------------------------
-    # Final test evaluation
-    # ------------------------------------------------------
+    # --------------------------------------------------------
+    # VERIFY BUDGET
+    # --------------------------------------------------------
 
-    test_auc = evaluate_test_auc(
+    if evaluations != budget:
+        raise RuntimeError(
+            f"Expected {budget} evaluations, "
+            f"but used {evaluations}."
+        )
+
+    # --------------------------------------------------------
+    # FINAL TEST EVALUATION
+    # --------------------------------------------------------
+
+    final_test_auc = evaluate_test_auc(
         test_features,
         test_labels,
         best_weights
     )
 
-    # ------------------------------------------------------
-    # Print results
-    # ------------------------------------------------------
-
-    print(
-        f"Best validation AUC: "
-        f"{best_validation_auc:.4f}"
-    )
-
-    print(
-        f"Final test AUC: "
-        f"{test_auc:.4f}"
-    )
-
-    print(
-        f"Evaluations used: "
-        f"{evaluations}"
-    )
-
-    print(
-        "Best weights:",
-        best_weights
-    )
-
-    # ------------------------------------------------------
-    # Return result
-    # ------------------------------------------------------
+    print(f"Best validation AUC: {best_validation_auc:.4f}")
+    print(f"Final test AUC: {final_test_auc:.4f}")
+    print(f"Evaluations used: {evaluations}")
+    print(f"Best weights: {best_weights}")
 
     return {
         "dataset": dataset_name,
         "budget": budget,
         "seed": seed,
         "best_validation_auc": best_validation_auc,
-        "final_test_auc": test_auc,
+        "final_test_auc": final_test_auc,
         "evaluations": evaluations,
         "weight_cn": best_weights[0],
         "weight_jaccard": best_weights[1],
@@ -313,49 +277,11 @@ def run_one_experiment(
     }
 
 
-# ==========================================================
-# MAIN EXPERIMENT
-# ==========================================================
+# ============================================================
+# SAVE RESULTS
+# ============================================================
 
-def main():
-
-    # ------------------------------------------------------
-    # Project root
-    # ------------------------------------------------------
-
-    project_root = os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            ".."
-        )
-    )
-
-    # ------------------------------------------------------
-    # Results folder
-    # ------------------------------------------------------
-
-    results_folder = os.path.join(
-        project_root,
-        "results"
-    )
-
-    os.makedirs(
-        results_folder,
-        exist_ok=True
-    )
-
-    # ------------------------------------------------------
-    # Output file
-    # ------------------------------------------------------
-
-    output_file = os.path.join(
-        results_folder,
-        "pso_results.csv"
-    )
-
-    # ------------------------------------------------------
-    # CSV columns
-    # ------------------------------------------------------
+def save_result(result):
 
     fieldnames = [
         "dataset",
@@ -370,11 +296,37 @@ def main():
         "weight_ra"
     ]
 
-    # ------------------------------------------------------
-    # Experiment counters
-    # ------------------------------------------------------
+    file_exists = (
+        os.path.exists(RESULTS_FILE)
+        and os.path.getsize(RESULTS_FILE) > 0
+    )
 
-    all_results = []
+    with open(
+        RESULTS_FILE,
+        "a",
+        newline=""
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames
+        )
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(result)
+
+
+# ============================================================
+# MAIN EXPERIMENT
+# ============================================================
+
+def main():
+
+    print("\n" + "=" * 60)
+    print("PSO LINK PREDICTION EXPERIMENT")
+    print("=" * 60)
 
     total_runs = (
         len(DATASETS)
@@ -382,146 +334,49 @@ def main():
         * len(SEEDS)
     )
 
-    current_run = 0
-
-    # ------------------------------------------------------
-    # Header
-    # ------------------------------------------------------
-
-    print("\n")
-    print("=" * 60)
-    print("PSO BUDGET CURVE EXPERIMENT")
-    print("=" * 60)
-
-    print(
-        f"Total experiments: {total_runs}"
-    )
-
-    print(
-        "Datasets:",
-        DATASETS
-    )
-
-    print(
-        "Budgets:",
-        BUDGETS
-    )
-
-    print(
-        "Seeds:",
-        SEEDS
-    )
-
-    print(
-        f"Validation ratio: {VALIDATION_RATIO}"
-    )
-
-    print(
-        f"Test ratio: {TEST_RATIO}"
-    )
-
-    print("=" * 60)
-
-    # ======================================================
-    # DATASET LOOP
-    # ======================================================
+    completed_runs = 0
 
     for dataset_name in DATASETS:
 
-        print("\n")
-        print("#" * 60)
+        print(f"\nPreparing dataset: {dataset_name}")
 
-        print(
-            f"LOADING DATASET: {dataset_name}"
-        )
+        graph = get_dataset(dataset_name)
 
-        print(
-            "#" * 60
-        )
-
-        graph = load_dataset(
-            dataset_name
-        )
-
-        # ==================================================
-        # BUDGET LOOP
-        # ==================================================
+        (
+            validation_features,
+            validation_labels,
+            test_features,
+            test_labels
+        ) = prepare_experiment_data(graph)
 
         for budget in BUDGETS:
 
-            # ==============================================
-            # SEED LOOP
-            # ==============================================
-
             for seed in SEEDS:
 
-                current_run += 1
+                result = run_experiment(
+                    dataset_name,
+                    budget,
+                    seed,
+                    validation_features,
+                    validation_labels,
+                    test_features,
+                    test_labels
+                )
+
+                save_result(result)
+
+                completed_runs += 1
 
                 print(
-                    f"\nRUN {current_run}/{total_runs}"
+                    f"\nProgress: {completed_runs}/{total_runs}"
                 )
 
-                result = run_one_experiment(
-                    dataset_name,
-                    graph,
-                    budget,
-                    seed
-                )
-
-                all_results.append(
-                    result
-                )
-
-                # --------------------------------------------------
-                # Save after every completed run
-                # --------------------------------------------------
-
-                with open(
-                    output_file,
-                    "w",
-                    newline=""
-                ) as csv_file:
-
-                    writer = csv.DictWriter(
-                        csv_file,
-                        fieldnames=fieldnames
-                    )
-
-                    writer.writeheader()
-
-                    writer.writerows(
-                        all_results
-                    )
-
-    # ======================================================
-    # FINISHED
-    # ======================================================
-
-    print("\n")
-    print("=" * 60)
-    print("ALL EXPERIMENTS COMPLETED")
+    print("\n" + "=" * 60)
+    print("ALL PSO EXPERIMENTS COMPLETED")
     print("=" * 60)
 
-    print(
-        f"Total completed runs: "
-        f"{len(all_results)}"
-    )
+    print(f"Results saved to:\n{RESULTS_FILE}")
 
-    print(
-        "\nResults saved to:"
-    )
-
-    print(
-        output_file
-    )
-
-    print("=" * 60)
-
-
-# ==========================================================
-# RUN
-# ==========================================================
 
 if __name__ == "__main__":
-
     main()

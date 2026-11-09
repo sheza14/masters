@@ -5,26 +5,19 @@ import csv
 import networkx as nx
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import roc_auc_score
 
-
-# ============================================================
-# ADD SRC FOLDER TO PYTHON PATH
-# ============================================================
-
+# Add src folder to Python path.
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 
-SRC_PATH = os.path.join(
-    PROJECT_ROOT,
-    "src"
-)
-
+SRC_PATH = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC_PATH)
 
-
-from artificial_bee_colony import ArtificialBeeColony
+from artificial_bee_colony import (
+    ArtificialBeeColony,
+    evaluate_test_auc
+)
 from fitness import FitnessFunction
 from features import calculate_features
 from data_loader import (
@@ -43,12 +36,7 @@ DATASETS = [
     "Netscience"
 ]
 
-BUDGETS = [
-    50,
-    500,
-    5000,
-    20000
-]
+BUDGETS = [50, 500, 5000, 20000]
 
 SEEDS = list(range(10))
 
@@ -71,10 +59,7 @@ RESULTS_DIR = os.path.join(
     "results"
 )
 
-os.makedirs(
-    RESULTS_DIR,
-    exist_ok=True
-)
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 RESULT_FILE = os.path.join(
     RESULTS_DIR,
@@ -89,11 +74,9 @@ RESULT_FILE = os.path.join(
 def load_dataset(dataset_name):
 
     if dataset_name == "Karate Club":
-
         return nx.karate_club_graph()
 
     elif dataset_name == "Netscience":
-
         path = os.path.join(
             PROJECT_ROOT,
             "data",
@@ -103,7 +86,6 @@ def load_dataset(dataset_name):
         return load_netscience(path)
 
     else:
-
         raise ValueError(
             f"Unknown dataset: {dataset_name}"
         )
@@ -115,12 +97,9 @@ def load_dataset(dataset_name):
 
 def prepare_experiment_data(graph):
 
-    # --------------------------------------------------------
-    # FINAL 30% TEST SPLIT
-    # --------------------------------------------------------
-
+    # Final 30% test split.
     (
-        _,
+        original_graph,
         training_graph,
         positive_test_edges,
         negative_test_edges
@@ -130,24 +109,20 @@ def prepare_experiment_data(graph):
         seed=TEST_SPLIT_SEED
     )
 
-    # --------------------------------------------------------
-    # INTERNAL 30% VALIDATION SPLIT
-    # --------------------------------------------------------
-
+    # Internal 30% validation split.
     (
         validation_training_graph,
         positive_validation_edges,
         negative_validation_edges
     ) = split_validation_graph(
-        training_graph,
+        training_graph=training_graph,
+        original_graph=original_graph,
+        excluded_negative_edges=negative_test_edges,
         validation_ratio=VALIDATION_RATIO,
         seed=VALIDATION_SPLIT_SEED
     )
 
-    # --------------------------------------------------------
-    # VALIDATION DATA
-    # --------------------------------------------------------
-
+    # Prepare validation data.
     validation_edges = (
         positive_validation_edges
         + negative_validation_edges
@@ -163,10 +138,7 @@ def prepare_experiment_data(graph):
         validation_edges
     )
 
-    # --------------------------------------------------------
-    # FINAL TEST DATA
-    # --------------------------------------------------------
-
+    # Prepare final test data.
     test_edges = (
         positive_test_edges
         + negative_test_edges
@@ -182,26 +154,17 @@ def prepare_experiment_data(graph):
         test_edges
     )
 
-    # --------------------------------------------------------
-    # FEATURE SCALING
-    # --------------------------------------------------------
-    # Fit ONLY on validation features.
-    # Use the SAME scaler for test features.
-    # --------------------------------------------------------
-
+    # Fit scaler only on validation features.
     scaler = MinMaxScaler()
 
     validation_features_scaled = pd.DataFrame(
-        scaler.fit_transform(
-            validation_features_raw
-        ),
+        scaler.fit_transform(validation_features_raw),
         columns=validation_features_raw.columns
     )
 
+    # Apply the same scaler to test features.
     test_features_scaled = pd.DataFrame(
-        scaler.transform(
-            test_features_raw
-        ),
+        scaler.transform(test_features_raw),
         columns=test_features_raw.columns
     )
 
@@ -211,8 +174,6 @@ def prepare_experiment_data(graph):
         test_features_scaled,
         test_labels
     )
-
-
 # ============================================================
 # RUN ONE EXPERIMENT
 # ============================================================
@@ -226,19 +187,11 @@ def run_one_experiment(
     seed
 ):
 
-    # --------------------------------------------------------
-    # FITNESS FUNCTION
-    # --------------------------------------------------------
-
     fitness = FitnessFunction(
         validation_features,
         validation_labels,
         budget=budget
     )
-
-    # --------------------------------------------------------
-    # ARTIFICIAL BEE COLONY
-    # --------------------------------------------------------
 
     abc = ArtificialBeeColony(
         fitness_function=fitness,
@@ -248,32 +201,18 @@ def run_one_experiment(
         limit=LIMIT
     )
 
-    # --------------------------------------------------------
-    # OPTIMIZATION
-    # --------------------------------------------------------
+    best_weights, best_validation_auc, evaluations = abc.optimize()
 
-    (
-        best_weights,
-        best_validation_auc,
-        evaluations
-    ) = abc.optimize()
+    if evaluations != budget:
+        raise RuntimeError(
+            f"Expected {budget} evaluations, got {evaluations}."
+        )
 
-    # --------------------------------------------------------
-    # FINAL TEST EVALUATION
-    # --------------------------------------------------------
-
-    weights = best_weights
-
-    scores = (
-        weights[0] * test_features["cn"]
-        + weights[1] * test_features["jaccard"]
-        + weights[2] * test_features["aa"]
-        + weights[3] * test_features["ra"]
-    )
-
-    final_test_auc = roc_auc_score(
+    # Evaluate the selected weights on the untouched test set.
+    final_test_auc = evaluate_test_auc(
+        test_features,
         test_labels,
-        scores
+        best_weights
     )
 
     return {
@@ -283,10 +222,10 @@ def run_one_experiment(
         "best_validation_auc": best_validation_auc,
         "final_test_auc": final_test_auc,
         "evaluations": evaluations,
-        "weight_cn": weights[0],
-        "weight_jaccard": weights[1],
-        "weight_aa": weights[2],
-        "weight_ra": weights[3]
+        "weight_cn": best_weights[0],
+        "weight_jaccard": best_weights[1],
+        "weight_aa": best_weights[2],
+        "weight_ra": best_weights[3]
     }
 
 
@@ -295,10 +234,6 @@ def run_one_experiment(
 # ============================================================
 
 def save_result(result):
-
-    file_exists = os.path.exists(
-        RESULT_FILE
-    )
 
     fieldnames = [
         "dataset",
@@ -312,6 +247,11 @@ def save_result(result):
         "weight_aa",
         "weight_ra"
     ]
+
+    file_exists = (
+        os.path.exists(RESULT_FILE)
+        and os.path.getsize(RESULT_FILE) > 0
+    )
 
     with open(
         RESULT_FILE,
@@ -342,24 +282,14 @@ def main():
 
     all_data = {}
 
-    # --------------------------------------------------------
-    # PREPARE FIXED DATA ONCE PER DATASET
-    # --------------------------------------------------------
-
+    # Prepare fixed data once for each dataset.
     for dataset_name in DATASETS:
 
-        print(
-            f"\nPreparing dataset: "
-            f"{dataset_name}"
-        )
+        print(f"\nPreparing dataset: {dataset_name}")
 
-        graph = load_dataset(
-            dataset_name
-        )
+        graph = load_dataset(dataset_name)
 
-        all_data[dataset_name] = (
-            prepare_experiment_data(graph)
-        )
+        all_data[dataset_name] = prepare_experiment_data(graph)
 
         (
             validation_features,
@@ -368,19 +298,8 @@ def main():
             test_labels
         ) = all_data[dataset_name]
 
-        print(
-            "Validation samples:",
-            len(validation_labels)
-        )
-
-        print(
-            "Test samples:",
-            len(test_labels)
-        )
-
-    # --------------------------------------------------------
-    # TOTAL RUNS
-    # --------------------------------------------------------
+        print("Validation samples:", len(validation_labels))
+        print("Test samples:", len(test_labels))
 
     total_runs = (
         len(DATASETS)
@@ -390,15 +309,9 @@ def main():
 
     completed_runs = 0
 
-    print(
-        f"\nTotal planned runs: "
-        f"{total_runs}"
-    )
+    print(f"\nTotal planned runs: {total_runs}")
 
-    # --------------------------------------------------------
-    # RUN ALL EXPERIMENTS
-    # --------------------------------------------------------
-
+    # Run all experiments.
     for dataset_name in DATASETS:
 
         (
@@ -412,21 +325,10 @@ def main():
 
             for seed in SEEDS:
 
-                print(
-                    "\n" + "-" * 70
-                )
-
-                print(
-                    f"Dataset: {dataset_name}"
-                )
-
-                print(
-                    f"Budget: {budget}"
-                )
-
-                print(
-                    f"Seed: {seed}"
-                )
+                print("\n" + "-" * 70)
+                print(f"Dataset: {dataset_name}")
+                print(f"Budget: {budget}")
+                print(f"Seed: {seed}")
 
                 result = run_one_experiment(
                     validation_features,
@@ -453,41 +355,16 @@ def main():
                     f"{result['final_test_auc']:.4f}"
                 )
 
-                print(
-                    f"Evaluations: "
-                    f"{result['evaluations']}"
-                )
+                print(f"Evaluations: {result['evaluations']}")
+                print(f"Completed: {completed_runs}/{total_runs}")
 
-                print(
-                    f"Completed: "
-                    f"{completed_runs}/{total_runs}"
-                )
+    print("\n" + "=" * 70)
+    print("ALL ABC EXPERIMENTS COMPLETED")
+    print("=" * 70)
 
-    # --------------------------------------------------------
-    # FINISHED
-    # --------------------------------------------------------
+    print(f"Total completed runs: {completed_runs}")
+    print(f"Results saved to: {RESULT_FILE}")
 
-    print(
-        "\n" + "=" * 70
-    )
-
-    print(
-        "ALL ABC EXPERIMENTS COMPLETED"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"Total completed runs: "
-        f"{completed_runs}"
-    )
-
-    print(
-        f"Results saved to: "
-        f"{RESULT_FILE}"
-    )
 
 if __name__ == "__main__":
     main()
